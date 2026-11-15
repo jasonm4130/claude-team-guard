@@ -12,7 +12,8 @@ import (
 // SubagentHandback refused ("the agent that spawned you is no longer
 // running") while the teammate is still active, and the teammate's Agent call
 // returns "ended without delivering a report ... Its unsent text is not
-// shown". The report is still in the helper's transcript, so recover it.
+// shown" (anthropics/claude-code#99651). The report is still in the helper's
+// transcript, so recover it.
 
 const lostMarker = "ended without delivering a report"
 

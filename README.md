@@ -1,36 +1,74 @@
 # claude-team-guard
 
-A Claude Code hook that stops agent-team work from silently going missing. It is one Go binary with no dependencies. It reads the hook payload on stdin and handles two events.
+[![CI](https://github.com/jasonm4130/claude-team-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/jasonm4130/claude-team-guard/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/jasonm4130/claude-team-guard?sort=semver)](https://github.com/jasonm4130/claude-team-guard/releases)
+[![Go](https://img.shields.io/github/go-mod/go-version/jasonm4130/claude-team-guard)](go.mod)
+[![License](https://img.shields.io/github/license/jasonm4130/claude-team-guard)](LICENSE)
 
-## What it fixes
+A [Claude Code](https://claude.com/claude-code) hook that stops [agent-team](https://code.claude.com/docs/en/agent-teams) work from silently going missing. It is a single Go binary with no dependencies and no configuration. It reads the hook payload on stdin and always fails open.
 
-**A teammate waits on background work and never wakes up.** A teammate starts a background Bash command or a Monitor, such as a CI watch, says "Waiting for CI." and ends its turn. Claude Code does not wake an idle teammate when that task finishes. The notice sits in a queue until something else messages the teammate ([anthropics/claude-code#77300](https://github.com/anthropics/claude-code/issues/77300)). The main session is not affected.
+If you run agent teams and keep finding teammates sitting idle after saying "Waiting for CI", or getting back "ended without delivering a report" from a helper subagent, this hook is for you.
 
-- **What the hook does:** on `TeammateIdle`, it lists the teammate's background tasks whose completion it hasn't seen. If there are any, it exits 2, so the teammate keeps working. It also tells the teammate to wait in the foreground, or to ask the lead to wake it if the wait is long.
-- **Loop guard:** it blocks at most twice for the same set of tasks, then lets the teammate idle.
+## The two bugs
 
-**A teammate's helper subagent loses its report.** Since Claude Code 2.1.323, a subagent started by a teammate has its `SubagentHandback` refused with "the agent that spawned you is no longer running", even though the teammate is still active. The teammate gets back "ended without delivering a report … Its unsent text is not shown". A `SendMessage` asking the helper to resend loses it again.
+### 1. Idle teammates aren't woken by their own background tasks
 
-- **What the hook does:** on `PostToolUse` for `Agent` or `SendMessage`, it reads the report from the helper's transcript and returns it to the teammate as `additionalContext`. It uses the last `SubagentHandback` message, or failing that the last text reply.
+A teammate starts a background Bash command or a Monitor, such as a CI watch, and ends its turn. The tool result told it "You will be notified when it completes". It isn't. Claude Code queues the completion notice, but nothing starts a turn for an idle teammate. The notice is delivered only when something else, usually the lead, sends the teammate a message. The main session isn't affected.
 
-### How often this happened
+Upstream: [anthropics/claude-code#77300](https://github.com/anthropics/claude-code/issues/77300)
 
-Measured over one machine's transcripts, 2026-11-05 to 2026-11-15, Claude Code 2.1.316 to 2.1.325:
+**What the hook does:** on `TeammateIdle`, it reads the teammate's transcript and lists the background tasks the teammate has launched but never seen complete. If there are any, the hook exits 2, so the teammate keeps working, and the teammate is told:
 
-- 56 of 57 background tasks that finished while their teammate was idle were delivered late: a median of 42 minutes, and at most 26 hours.
-- 41 of 42 foreground helper subagents started by teammates lost their report. This was on 2.1.323 and 2.1.325.
+```
+Don't go idle yet: these background tasks of yours haven't reported back:
+- bwait (output: /tmp/…/tasks/bwait.output)
+You are a teammate, and an idle teammate is NOT woken when its background tasks finish …
+Wait in the foreground instead: a Bash call with timeout 600000 that blocks until the work is done …
+If the wait will run past about 30 minutes, SendMessage team-lead … then stop.
+```
 
-Replayed against those transcripts, the binary recovers all 44 lost reports: 41 from `Agent` and 3 from `SendMessage`. It would have blocked the idle of 12 of the 173 teammates.
+It blocks at most twice for the same set of tasks, then lets the teammate idle. It can't trap one.
+
+### 2. A teammate's helper subagent loses its report
+
+When a teammate spawns a subagent with the Agent tool, the subagent's `SubagentHandback` is refused with "Nothing was sent: the agent that spawned you is no longer running". This happens while the teammate is alive and waiting. The teammate gets back "The subagent ended without delivering a report … Its unsent text is not shown". If it asks the helper to resend with `SendMessage`, the report is lost again.
+
+Upstream: [anthropics/claude-code#99651](https://github.com/anthropics/claude-code/issues/99651)
+
+**What the hook does:** on `PostToolUse` for `Agent` or `SendMessage`, when the result says the report was lost, the hook reads the report from the helper's own transcript. It uses the last `SubagentHandback` message, or else the last text reply. It hands that report to the teammate as `additionalContext`.
+
+## Does it matter?
+
+These numbers come from ten days of real agent-team transcripts on one machine, 2026-11-05 to 2026-11-15, Claude Code 2.1.316 to 2.1.325:
+
+| | |
+|---|---|
+| Background tasks that finished while their teammate was idle | 57 |
+| …delivered only when something else woke the teammate | 56, median 42 min late, worst 26 h |
+| Foreground helper subagents spawned by teammates (2.1.323+) | 42 |
+| …whose report was lost | 41 |
+| Lost reports this hook recovers when replayed over those transcripts | 44 of 44 (41 `Agent`, 3 `SendMessage` retries) |
+
+**Live check (Claude Code 2.1.325):**
+- A teammate that started `sleep 40` in the background and tried to idle was held by the hook. It waited in the foreground and reported back unprompted.
+- A teammate whose helper's handback was refused received the helper's exact report through the hook.
 
 ## Install
 
-Download the archive for your platform from [Releases](https://github.com/jasonm4130/claude-team-guard/releases) and check it against `checksums.txt`. Then:
+Download a binary from [the latest release](https://github.com/jasonm4130/claude-team-guard/releases/latest) and check it against `checksums.txt`:
 
 ```sh
+tar -xzf claude-team-guard_*_darwin_arm64.tar.gz
 install -m 755 claude-team-guard_*/claude-team-guard ~/.local/bin/
 ```
 
-Add both hooks to `~/.claude/settings.json`:
+Or build it from source, which needs only a Go toolchain:
+
+```sh
+go install github.com/jasonm4130/claude-team-guard@latest
+```
+
+Then register both hooks in `~/.claude/settings.json`:
 
 ```json
 "hooks": {
@@ -44,14 +82,44 @@ Add both hooks to `~/.claude/settings.json`:
 }
 ```
 
-`claude-team-guard --version` prints the build.
+Check the install:
 
-## Design notes
+```sh
+claude-team-guard --version
+echo '{"hook_event_name":"TeammateIdle"}' | claude-team-guard; echo "exit $?"   # exit 0, no output
+```
 
-- **Fail open.** Any parse error, missing file or panic exits 0 with no output. A bug here must never block an agent.
-- **The hook doesn't wait.** It returns at once, and the teammate does the waiting with a foreground call. Sleeping inside the hook would hold the teammate inside a hook timeout instead.
-- **The transcript is the source of truth.** Tasks are matched by the exact text Claude Code writes when it launches them (`Command running in background with ID:`, `Monitor started (task`) and by the `<task-id>` in completion notices. If a Claude Code release changes that text, the hook stops matching and fails open: it lets the teammate idle as before.
-- **State** is a per-teammate, per-task-set counter under `os.UserCacheDir()/claude-team-guard`, written atomically. Losing it is harmless.
-- **The recovered report is capped at 40,000 bytes.**
+## How it works
 
-Remove it once both upstream bugs are fixed.
+- **One binary for every event.** It dispatches on `hook_event_name` and ignores any event it doesn't handle.
+- **It finds the transcripts by itself.** Teammates and their helpers write to `<session>/subagents/agent-*.jsonl` beside the lead's transcript. The hook locates the right file from `transcript_path`, using `agent_id` or `teammate_name` when it needs to.
+- **Pending tasks are matched on the text Claude Code writes.** A task counts as launched when its tool result says `Command running in background with ID: …` or `Monitor started (task …`. It counts as seen once a `<task-id>` completion notice arrives, or once the teammate itself stops it with `TaskStop` or `KillShell`.
+- **It never waits.** The hook returns immediately, and the teammate does the waiting with a foreground call.
+- **It fails open.** A parse error, a missing file or a panic exits 0 with no output. A bug here leaves Claude Code behaving as it would without the hook.
+- **State is a small counter per teammate and task set,** kept under your user cache directory (`claude-team-guard/`) and written atomically. Deleting it is harmless.
+- **A recovered report is capped at 40,000 bytes.**
+
+## Limitations
+
+- It depends on Claude Code's transcript wording, checked against 2.1.325. If a release changes that wording, the hook stops matching and falls back to doing nothing. It won't misfire.
+- It only tracks background Bash and Monitor tasks. Agent calls made by a teammate already run in the foreground.
+- It was tested with in-process teammates (`teammateMode: "in-process"`) on macOS. It should work on Linux. Windows is untested.
+
+## Removing it
+
+Remove the two hook entries from `settings.json` once #77300 and #99651 are fixed. Nothing else needs cleaning up.
+
+## Development
+
+```sh
+gofmt -l .                  # must print nothing
+go vet ./...
+go test -race ./...
+golangci-lint run ./...
+```
+
+The tests drive `run()` end to end over synthetic transcripts. Releases are built by GoReleaser from `vX.Y.Z` tags.
+
+## License
+
+[MIT](LICENSE)

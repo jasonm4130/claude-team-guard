@@ -30,8 +30,8 @@ golangci-lint run ./...
 
 ## Releasing
 
-Releases are tag-driven, as in claude-statusline. Push an annotated `vX.Y.Z` tag on `main`, and the Release workflow builds darwin/linux × amd64/arm64 with checksums and SBOMs. To install on Jason's machine: download the darwin_arm64 archive, check it against `checksums.txt`, then `install -m 755` into `~/.local/bin/`. The hooks that call it live in chezmoi (`private_dot_claude/settings.json` in the dotfiles repo), not here.
+Releases are tag-driven. Push an annotated `vX.Y.Z` tag on `main`, and the Release workflow builds darwin/linux × amd64/arm64 with checksums and SBOMs. To install: download the archive for the platform, check it against `checksums.txt`, then `install -m 755` into `~/.local/bin/`. The hook registration lives in the user's `~/.claude/settings.json`, not here.
 
 ## Retiring
 
-When anthropics/claude-code#77300 and the teammate handback bug are fixed, remove the hooks from settings and archive this repo.
+When anthropics/claude-code#77300 and #99651 are fixed, remove the hooks from settings and archive this repo.
