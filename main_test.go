@@ -341,3 +341,73 @@ func TestIdleYieldsToPendingMessage(t *testing.T) {
 		}
 	})
 }
+
+func writeInbox(t *testing.T, lead, team, name, body string) {
+	t.Helper()
+	dir := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(lead))), "teams", team, "inboxes")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIdleYieldFindsTheRightInbox(t *testing.T) {
+	recs := []map[string]any{bashLaunch("bwait"), say("Waiting for CI.")}
+	unread := `[{"from":"team-lead","text":"stop","read":false}]`
+	t.Run("resumed session: team read from the lead's spawn result", func(t *testing.T) {
+		lead := realSession(t, "tm", "", recs...)
+		// The resumed lead keeps its original team, not session-<new id>.
+		writeJSONL(t, lead, map[string]any{"type": "user", "toolUseResult": map[string]any{
+			"name": "tm", "tmux_pane_id": "in-process", "team_name": "session-0ld0ld00"}})
+		writeInbox(t, lead, "session-0ld0ld00", "tm", unread)
+		env := Env{StateDir: t.TempDir()}
+		if code, _, msg := runHook(t, env, idlePayload(lead, "tm")); code != 0 || msg != "" {
+			t.Fatalf("exit = %d, stderr = %q; want 0 and nothing", code, msg)
+		}
+		// Cached: still found once the transcript no longer holds it.
+		writeJSONL(t, lead)
+		if code, _, _ := runHook(t, env, idlePayload(lead, "tm")); code != 0 {
+			t.Fatalf("cached lookup: exit = %d, want 0", code)
+		}
+	})
+	t.Run("resumed session without the spawn record falls back and blocks", func(t *testing.T) {
+		lead := realSession(t, "tm", "", recs...)
+		writeInbox(t, lead, "session-0ld0ld00", "tm", unread)
+		if code, _, _ := runHook(t, Env{StateDir: t.TempDir()}, idlePayload(lead, "tm")); code != 2 {
+			t.Fatalf("exit = %d, want 2", code)
+		}
+	})
+	t.Run("names are sanitised like Claude Code", func(t *testing.T) {
+		lead := realSession(t, "tm", "", recs...)
+		writeInbox(t, lead, "my-team", "tm", unread)
+		p := idlePayload(lead, "tm")
+		p["team_name"] = "my team"
+		if code, _, _ := runHook(t, Env{StateDir: t.TempDir()}, p); code != 0 {
+			t.Fatalf("exit = %d, want 0", code)
+		}
+	})
+	t.Run("dot-dot team stays inside teams/", func(t *testing.T) {
+		lead := realSession(t, "tm", "", recs...)
+		config := filepath.Dir(filepath.Dir(filepath.Dir(lead)))
+		if err := os.MkdirAll(filepath.Join(config, "inboxes"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(config, "inboxes", "tm.json"), []byte(unread), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p := idlePayload(lead, "tm")
+		p["team_name"] = ".."
+		if code, _, _ := runHook(t, Env{StateDir: t.TempDir()}, p); code != 2 {
+			t.Fatalf("exit = %d, want 2", code)
+		}
+	})
+	t.Run("teammate's own transcript path", func(t *testing.T) {
+		lead := realSession(t, "tm", unread, recs...)
+		p := idlePayload(filepath.Join(strings.TrimSuffix(lead, ".jsonl"), "subagents", "agent-atm-123.jsonl"), "tm")
+		if code, _, _ := runHook(t, Env{StateDir: t.TempDir()}, p); code != 0 {
+			t.Fatalf("exit = %d, want 0", code)
+		}
+	})
+}
