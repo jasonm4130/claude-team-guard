@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -479,6 +480,134 @@ func TestEarlyMessages(t *testing.T) {
 		}
 		if _, out, _ := runHook(t, env, p); !strings.Contains(out, "second") || strings.Contains(out, "Rescope") {
 			t.Errorf("got %s", out)
+		}
+	})
+}
+
+func setMeta(t *testing.T, lead, file string, meta map[string]any) {
+	t.Helper()
+	b, _ := json.Marshal(meta)
+	if err := os.WriteFile(filepath.Join(strings.TrimSuffix(lead, ".jsonl"), "subagents", file), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEarlyMessagesIdentity(t *testing.T) {
+	msg := `[{"from":"team-lead","text":"hello tm","msg_id":"m1"}]`
+	t.Run("resumed session: team from meta", func(t *testing.T) {
+		lead := realSession(t, "tm", "", say("x"))
+		setMeta(t, lead, "agent-atm-123.meta.json", map[string]any{"name": "tm", "taskKind": "in_process_teammate", "teamName": "session-0ld0ld00"})
+		writeInbox(t, lead, "session-0ld0ld00", "tm", msg)
+		if _, out, _ := runHook(t, Env{StateDir: t.TempDir()}, postPayload(lead, map[string]any{"agent_id": "atm-123"})); !strings.Contains(out, "hello tm") {
+			t.Fatalf("got %q", out)
+		}
+	})
+	t.Run("name@team agent_id", func(t *testing.T) {
+		lead := realSession(t, "tm", msg, say("x"))
+		if _, out, _ := runHook(t, Env{StateDir: t.TempDir()}, postPayload(lead, map[string]any{"agent_id": "tm@session-0123abcd"})); !strings.Contains(out, "hello tm") {
+			t.Fatalf("got %q", out)
+		}
+	})
+	t.Run("plain subagent by agent_id gets nothing, even with teammate_name", func(t *testing.T) {
+		lead := realSession(t, "tm", msg, say("x"))
+		writeJSONL(t, filepath.Join(strings.TrimSuffix(lead, ".jsonl"), "subagents", "agent-ahelp-1.jsonl"), say("x"))
+		setMeta(t, lead, "agent-ahelp-1.meta.json", map[string]any{"name": "helper", "agentType": "Explore"})
+		for _, extra := range []map[string]any{{"agent_id": "ahelp-1"}, {"agent_id": "ahelp-1", "teammate_name": "tm"}} {
+			if _, out, _ := runHook(t, Env{StateDir: t.TempDir()}, postPayload(lead, extra)); out != "" {
+				t.Errorf("%v got %q", extra, out)
+			}
+		}
+	})
+	t.Run("spawn-record miss is cached", func(t *testing.T) {
+		lead := realSession(t, "tm", "", say("x"))
+		env := Env{StateDir: t.TempDir()}
+		p := postPayload(lead, map[string]any{"agent_id": "atm-123"})
+		runHook(t, env, p)
+		// Now a record naming another team appears; the cached fallback stands.
+		writeJSONL(t, lead, map[string]any{"type": "user", "toolUseResult": map[string]any{"name": "tm", "team_name": "other"}})
+		writeInbox(t, lead, "session-0123abcd", "tm", msg)
+		if _, out, _ := runHook(t, env, p); !strings.Contains(out, "hello tm") {
+			t.Fatalf("got %q", out)
+		}
+	})
+}
+
+func TestEarlyMessagesDelivery(t *testing.T) {
+	t.Run("unwritable state shows nothing", func(t *testing.T) {
+		lead := realSession(t, "tm", `[{"from":"team-lead","text":"hi","msg_id":"m1"}]`, say("x"))
+		state := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(state, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 3; i++ {
+			if _, out, _ := runHook(t, Env{StateDir: state}, postPayload(lead, map[string]any{"agent_id": "atm-123"})); out != "" {
+				t.Fatalf("call %d got %q", i, out)
+			}
+		}
+	})
+	t.Run("concurrent calls show a message once", func(t *testing.T) {
+		for trial := 0; trial < 10; trial++ {
+			lead := realSession(t, "tm", `[{"from":"team-lead","text":"once only","msg_id":"m1"}]`, say("x"))
+			env := Env{StateDir: t.TempDir()}
+			outs := make(chan string, 8)
+			var wg sync.WaitGroup
+			for i := 0; i < 8; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					in, _ := json.Marshal(postPayload(lead, map[string]any{"agent_id": "atm-123"}))
+					var out, errb bytes.Buffer
+					run(bytes.NewReader(in), &out, &errb, env)
+					outs <- out.String()
+				}()
+			}
+			wg.Wait()
+			close(outs)
+			n := 0
+			for o := range outs {
+				n += strings.Count(o, "once only")
+			}
+			if n != 1 {
+				t.Fatalf("trial %d: shown %d times", trial, n)
+			}
+		}
+	})
+	t.Run("messages that don't fit wait for the next call", func(t *testing.T) {
+		big := strings.Repeat("b", maxInjected)
+		inbox, _ := json.Marshal([]map[string]any{{"from": "team-lead", "text": "small", "msg_id": "s"}, {"from": "team-lead", "text": big, "msg_id": "b"}})
+		lead := realSession(t, "tm", string(inbox), say("x"))
+		env := Env{StateDir: t.TempDir()}
+		p := postPayload(lead, map[string]any{"agent_id": "atm-123"})
+		_, out1, _ := runHook(t, env, p)
+		if !strings.Contains(out1, "small") || strings.Contains(out1, "bbbb") {
+			t.Fatalf("first call: %.200q", out1)
+		}
+		_, out2, _ := runHook(t, env, p)
+		if !strings.Contains(out2, "bbbb") || !strings.Contains(out2, "truncated by claude-team-guard") || strings.Contains(out2, "small") {
+			t.Fatalf("second call: %.200q", out2)
+		}
+	})
+	t.Run("message without msg_id shown once", func(t *testing.T) {
+		lead := realSession(t, "tm", `[{"from":"team-lead","text":"no id","timestamp":"t1"}]`, say("x"))
+		env := Env{StateDir: t.TempDir()}
+		p := postPayload(lead, map[string]any{"agent_id": "atm-123"})
+		if _, out, _ := runHook(t, env, p); !strings.Contains(out, "no id") {
+			t.Fatalf("got %q", out)
+		}
+		if _, out, _ := runHook(t, env, p); out != "" {
+			t.Fatalf("shown twice: %q", out)
+		}
+	})
+	t.Run("recovered report and message share one output", func(t *testing.T) {
+		lead := realSession(t, "tm", `[{"from":"team-lead","text":"lead says hi","msg_id":"m1"}]`, say("x"))
+		writeJSONL(t, filepath.Join(strings.TrimSuffix(lead, ".jsonl"), "subagents", "agent-ahelper99.jsonl"),
+			toolUse("SubagentHandback", map[string]any{"message": "helper report"}))
+		_, out, _ := runHook(t, Env{StateDir: t.TempDir()}, map[string]any{
+			"hook_event_name": "PostToolUse", "tool_name": "Agent", "transcript_path": lead, "agent_id": "atm-123",
+			"tool_response": map[string]any{"content": []any{map[string]any{"type": "text", "text": lostResult}}},
+		})
+		if strings.Count(out, "\n") != 1 || !strings.Contains(out, "helper report") || !strings.Contains(out, "lead says hi") {
+			t.Fatalf("got %q", out)
 		}
 	})
 }
