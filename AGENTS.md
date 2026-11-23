@@ -15,7 +15,7 @@ A Claude Code hook for agent teams: one Go binary that reads a hook payload on s
 
 - `main.go`: the payload and dispatch.
 - `idle.go`: TeammateIdle and the loop guard.
-- `inbox.go`: the pending-message check that lets a teammate idle so the lead's message is delivered.
+- `inbox.go`: the team inbox. It lets a teammate idle when a message waits, and shows waiting messages mid-turn on `PostToolUse`.
 - `recover.go`: lost-report recovery.
 - `transcript.go`: transcript location and scanning.
 - `main_test.go`: tests, run end to end through `run()`.

@@ -11,6 +11,8 @@
 //     delivering a report", recover the report from the helper's transcript
 //     and hand it to the teammate as additional context. The same applies to
 //     a SendMessage that resumes such a helper and loses its report again.
+//   - PostToolUse on any tool: show a teammate the messages waiting in its
+//     team inbox, which Claude Code delivers only between turns.
 //
 // Any failure exits 0 with no output, so a bug here never blocks an agent.
 package main
@@ -20,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 var (
@@ -64,7 +67,29 @@ func run(stdin io.Reader, stdout, stderr io.Writer, env Env) (code int) {
 	case "TeammateIdle":
 		return idle(p, stderr, env)
 	case "PostToolUse":
-		return recoverReport(p, stdout)
+		return postToolUse(p, stdout, env)
 	}
+	return 0
+}
+
+// postToolUse hands the agent any recovered report and any message waiting in
+// its team inbox, as one additionalContext.
+func postToolUse(p Payload, stdout io.Writer, env Env) int {
+	var parts []string
+	for _, s := range []string{recoverReport(p), earlyMessages(p, env)} {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) == 0 {
+		return 0
+	}
+	out := map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName":     "PostToolUse",
+			"additionalContext": strings.Join(parts, "\n\n"),
+		},
+	}
+	_ = json.NewEncoder(stdout).Encode(out)
 	return 0
 }

@@ -411,3 +411,74 @@ func TestIdleYieldFindsTheRightInbox(t *testing.T) {
 		}
 	})
 }
+
+func postPayload(lead string, extra map[string]any) map[string]any {
+	p := map[string]any{"hook_event_name": "PostToolUse", "transcript_path": lead, "tool_name": "Bash",
+		"tool_input": map[string]any{"command": "ls"}, "tool_response": map[string]any{"stdout": "x"}}
+	for k, v := range extra {
+		p[k] = v
+	}
+	return p
+}
+
+func teammateFile(lead, name string) string {
+	return filepath.Join(strings.TrimSuffix(lead, ".jsonl"), "subagents", "agent-a"+name+"-123.jsonl")
+}
+
+func TestEarlyMessages(t *testing.T) {
+	inbox := `[{"from":"team-lead","text":"Rescope: only drop the secondary route.","summary":"Rescope","msg_id":"m1","read":false},
+		{"from":"team-lead","text":"{\"type\":\"shutdown_request\",\"request_id\":\"r\"}","msg_id":"m2"},
+		{"from":"team-lead","text":"old news","msg_id":"m3","read":true}]`
+	identify := map[string]func(lead string) map[string]any{
+		"own transcript path": func(lead string) map[string]any { return map[string]any{"transcript_path": teammateFile(lead, "tm")} },
+		"agent_id":            func(string) map[string]any { return map[string]any{"agent_id": "atm-123"} },
+		"teammate_name":       func(string) map[string]any { return map[string]any{"teammate_name": "tm"} },
+	}
+	for how, extra := range identify {
+		t.Run(how, func(t *testing.T) {
+			lead := realSession(t, "tm", inbox, say("working"))
+			env := Env{StateDir: t.TempDir()}
+			code, out, _ := runHook(t, env, postPayload(lead, extra(lead)))
+			if code != 0 || !strings.Contains(out, "Rescope: only drop the secondary route.") || !strings.Contains(out, "additionalContext") {
+				t.Fatalf("exit %d, out %q", code, out)
+			}
+			if strings.Contains(out, "shutdown_request") || strings.Contains(out, "old news") {
+				t.Errorf("injected a protocol or read message: %s", out)
+			}
+			if _, out2, _ := runHook(t, env, postPayload(lead, extra(lead))); out2 != "" {
+				t.Errorf("same message shown twice: %s", out2)
+			}
+		})
+	}
+	t.Run("lead and plain subagents get nothing", func(t *testing.T) {
+		lead := realSession(t, "tm", inbox, say("working"))
+		env := Env{StateDir: t.TempDir()}
+		if _, out, _ := runHook(t, env, postPayload(lead, nil)); out != "" {
+			t.Errorf("lead got %s", out)
+		}
+		plain := filepath.Join(strings.TrimSuffix(lead, ".jsonl"), "subagents", "agent-aplain.jsonl")
+		writeJSONL(t, plain, say("x"))
+		if _, out, _ := runHook(t, env, postPayload(lead, map[string]any{"transcript_path": plain})); out != "" {
+			t.Errorf("plain subagent got %s", out)
+		}
+	})
+	t.Run("unsafe agent_id ignored", func(t *testing.T) {
+		lead := realSession(t, "tm", inbox, say("working"))
+		if _, out, _ := runHook(t, Env{StateDir: t.TempDir()}, postPayload(lead, map[string]any{"agent_id": "../../x"})); out != "" {
+			t.Errorf("got %s", out)
+		}
+	})
+	t.Run("a later message is shown", func(t *testing.T) {
+		lead := realSession(t, "tm", inbox, say("working"))
+		env := Env{StateDir: t.TempDir()}
+		p := postPayload(lead, map[string]any{"teammate_name": "tm"})
+		runHook(t, env, p)
+		file := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(lead))), "teams", "session-0123abcd", "inboxes", "tm.json")
+		if err := os.WriteFile(file, []byte(`[{"from":"team-lead","text":"second","msg_id":"m9"}]`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, out, _ := runHook(t, env, p); !strings.Contains(out, "second") || strings.Contains(out, "Rescope") {
+			t.Errorf("got %s", out)
+		}
+	})
+}

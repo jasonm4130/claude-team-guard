@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 // A teammate receives SendMessage only between turns. Claude Code holds each
@@ -120,4 +124,139 @@ func inboxPending(p Payload, env Env) bool {
 		}
 	}
 	return false
+}
+
+type inboxMsg struct {
+	From    string `json:"from"`
+	Text    string `json:"text"`
+	Summary string `json:"summary"`
+	MsgID   string `json:"msg_id"`
+	Time    string `json:"timestamp"`
+	Read    *bool  `json:"read"`
+}
+
+func (m inboxMsg) unread() bool { return m.Read == nil || !*m.Read }
+
+func (m inboxMsg) key() string {
+	if m.MsgID != "" {
+		return m.MsgID
+	}
+	h := sha256.Sum256([]byte(m.From + "\x00" + m.Time + "\x00" + m.Text))
+	return hex.EncodeToString(h[:8])
+}
+
+// protocol reports a structured message (shutdown_request, plan approval and
+// the like): those are for Claude Code to route, not for a teammate to read early.
+func (m inboxMsg) protocol() bool {
+	t := strings.TrimSpace(m.Text)
+	if !strings.HasPrefix(t, "{") {
+		return false
+	}
+	var v struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal([]byte(t), &v) == nil && v.Type != ""
+}
+
+// teammateName names the in-process teammate this payload comes from, or ""
+// for the lead or a plain subagent.
+func teammateName(p Payload) string {
+	if p.TeammateName != "" {
+		return p.TeammateName
+	}
+	path := ""
+	if filepath.Base(filepath.Dir(p.TranscriptPath)) == "subagents" {
+		path = p.TranscriptPath
+	} else if p.AgentID != "" {
+		id, _, _ := strings.Cut(p.AgentID, "@")
+		if !safeID.MatchString(id) {
+			return ""
+		}
+		path = filepath.Join(sessionDir(p.TranscriptPath), "subagents", "agent-"+id+".jsonl")
+	}
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(strings.TrimSuffix(path, ".jsonl") + ".meta.json")
+	if err != nil {
+		return ""
+	}
+	var meta struct {
+		Name     string `json:"name"`
+		TaskKind string `json:"taskKind"`
+	}
+	if json.Unmarshal(b, &meta) != nil || meta.TaskKind != "in_process_teammate" {
+		return ""
+	}
+	return meta.Name
+}
+
+// maxInjected caps the text handed over in one tool call.
+const maxInjected = 20000
+
+// earlyMessages returns waiting messages the teammate hasn't been shown yet,
+// as additionalContext text, so it sees them after its current tool call
+// rather than when its turn ends. Each message is shown once.
+func earlyMessages(p Payload, env Env) string {
+	name := teammateName(p)
+	path := inboxPath(p, name, env)
+	if path == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var msgs []inboxMsg
+	if json.Unmarshal(raw, &msgs) != nil || len(msgs) == 0 {
+		return ""
+	}
+	stateFile := filepath.Join(env.StateDir, unsafeChars.ReplaceAllString("inbox__"+path, "_"))
+	if len(stateFile) > 250 {
+		h := sha256.Sum256([]byte(path))
+		stateFile = filepath.Join(env.StateDir, "inbox__"+hex.EncodeToString(h[:12]))
+	}
+	seen := map[string]bool{}
+	if b, err := os.ReadFile(stateFile); err == nil {
+		for _, k := range strings.Fields(string(b)) {
+			seen[k] = true
+		}
+	}
+	var b strings.Builder
+	var keys []string
+	for _, m := range msgs {
+		if !m.unread() || m.protocol() || strings.TrimSpace(m.Text) == "" || seen[m.key()] {
+			continue
+		}
+		keys = append(keys, m.key())
+		from := m.From
+		if from == "" {
+			from = "a teammate"
+		}
+		fmt.Fprintf(&b, "\n--- message from %s", from)
+		if m.Summary != "" {
+			fmt.Fprintf(&b, " (%s)", m.Summary)
+		}
+		b.WriteString(" ---\n")
+		b.WriteString(strings.TrimSpace(m.Text))
+		b.WriteString("\n")
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	body := b.String()
+	if len(body) > maxInjected {
+		body = body[:maxInjected] + "\n[truncated by claude-team-guard; the full text arrives when your turn ends]"
+	}
+	// A lost write only means a message is shown twice, never hidden.
+	all := make([]string, 0, len(seen)+len(keys))
+	for k := range seen {
+		all = append(all, k)
+	}
+	all = append(all, keys...)
+	_ = writeAtomic(stateFile, []byte(strings.Join(all, "\n")))
+	return "claude-team-guard: new message(s) arrived for you mid-turn. Claude Code would only " +
+		"deliver them when your turn ends, so they are shown now. Read them before your next " +
+		"step and change course if they ask you to. The same message(s) will arrive again " +
+		"formally when your turn ends: that copy is a duplicate, not a new instruction.\n" + body
 }
