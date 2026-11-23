@@ -39,6 +39,12 @@ Upstream: [anthropics/claude-code#96225](https://github.com/anthropics/claude-co
 
 **What the hook does:** on `PostToolUse` for `Agent` or `SendMessage`, when the result says the report was lost, the hook reads the report from the helper's own transcript. It uses the last `SubagentHandback` message, or else the last text reply. It hands that report to the teammate as `additionalContext`.
 
+### 3. A teammate only reads the lead's messages between turns
+
+A message sent to a busy teammate with `SendMessage` waits until the teammate's turn ends. In the transcripts, all 102 lead messages to teammates arrived only after a turn ended. In 35 of them, the teammate made a median of 39 tool calls before seeing the message, so corrections like "rescope" landed after the work was done. A background subagent with no team name gets the same message mid-turn, at its next tool call.
+
+**What the hook does:** on `PostToolUse` for any tool, when the agent is an in-process teammate, it reads the teammate's team inbox. Any unread message the teammate hasn't been shown is handed over as `additionalContext`, so the teammate sees it after its current tool call. Each message is shown once. Structured protocol messages, such as shutdown requests, are left for Claude Code to deliver. The teammate is told that the message will arrive again when its turn ends, and that the second copy is a duplicate. A long foreground command still holds the message until it returns.
+
 ## Does it matter?
 
 These numbers come from ten days of real agent-team transcripts on one machine, 2026-11-05 to 2026-11-15, Claude Code 2.1.316 to 2.1.325:
@@ -78,7 +84,7 @@ Then register both hooks in `~/.claude/settings.json`:
     { "hooks": [ { "type": "command", "command": "~/.local/bin/claude-team-guard" } ] }
   ],
   "PostToolUse": [
-    { "matcher": "Agent|SendMessage",
+    { "matcher": "*",
       "hooks": [ { "type": "command", "command": "~/.local/bin/claude-team-guard" } ] }
   ]
 }

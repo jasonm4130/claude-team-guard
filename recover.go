@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"io"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -41,9 +40,9 @@ func agentID(resp json.RawMessage) string {
 	return ""
 }
 
-func recoverReport(p Payload, stdout io.Writer) int {
+func recoverReport(p Payload) string {
 	if !strings.Contains(string(p.ToolResponse), lostMarker) {
-		return 0
+		return ""
 	}
 	var id string
 	switch p.ToolName {
@@ -60,25 +59,18 @@ func recoverReport(p Payload, stdout io.Writer) int {
 		}
 	}
 	if id == "" {
-		return 0
+		return ""
 	}
 	path := filepath.Join(sessionDir(p.TranscriptPath), "subagents", "agent-"+id+".jsonl")
 	report, err := lastReport(path)
 	report = strings.TrimSpace(report)
 	if err != nil || report == "" {
-		return 0
+		return ""
 	}
 	if len(report) > maxRecovered {
 		report = report[:maxRecovered] + "\n[truncated by claude-team-guard]"
 	}
-	out := map[string]any{
-		"hookSpecificOutput": map[string]any{
-			"hookEventName": "PostToolUse",
-			"additionalContext": "claude-team-guard recovered this subagent's report from its transcript " +
-				"(" + path + "). Claude Code dropped it because of a handback bug, not because the " +
-				"subagent failed. Treat it as the subagent's result:\n\n" + report,
-		},
-	}
-	_ = json.NewEncoder(stdout).Encode(out)
-	return 0
+	return "claude-team-guard recovered this subagent's report from its transcript " +
+		"(" + path + "). Claude Code dropped it because of a handback bug, not because the " +
+		"subagent failed. Treat it as the subagent's result:\n\n" + report
 }
