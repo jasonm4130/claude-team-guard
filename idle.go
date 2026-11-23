@@ -37,6 +37,9 @@ func idle(p Payload, stderr io.Writer, env Env) int {
 	if err != nil || len(tasks) == 0 {
 		return 0
 	}
+	if inboxPending(p, env) {
+		return 0
+	}
 	who := p.TeammateName
 	if who == "" {
 		who = p.AgentID

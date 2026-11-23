@@ -15,6 +15,7 @@ A Claude Code hook for agent teams: one Go binary that reads a hook payload on s
 
 - `main.go`: the payload and dispatch.
 - `idle.go`: TeammateIdle and the loop guard.
+- `inbox.go`: the pending-message check that lets a teammate idle so the lead's message is delivered.
 - `recover.go`: lost-report recovery.
 - `transcript.go`: transcript location and scanning.
 - `main_test.go`: tests, run end to end through `run()`.
@@ -34,4 +35,4 @@ Releases are tag-driven. Push an annotated `vX.Y.Z` tag on `main`, and the Relea
 
 ## Retiring
 
-When anthropics/claude-code#77300 and #99651 are fixed, remove the hooks from settings and archive this repo.
+When anthropics/claude-code#77300 and #96225 (which #99651 duplicates) are fixed, remove the hooks from settings and archive this repo.

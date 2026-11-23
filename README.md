@@ -29,11 +29,13 @@ If the wait will run past about 30 minutes, SendMessage team-lead … then stop.
 
 It blocks at most twice for the same set of tasks, then lets the teammate idle. It can't trap one.
 
+It also lets the teammate idle whenever a message is waiting in its team inbox. A teammate only receives messages between turns. Without this check, a block sends it back into a foreground wait while the lead's message sits undelivered: in real transcripts, 11 lead messages waited through a block this way, some for hours. Letting the teammate idle delivers the message at once. A yield doesn't count against the two blocks.
+
 ### 2. A teammate's helper subagent loses its report
 
 When a teammate spawns a subagent with the Agent tool, the subagent's `SubagentHandback` is refused with "Nothing was sent: the agent that spawned you is no longer running". This happens while the teammate is alive and waiting. The teammate gets back "The subagent ended without delivering a report … Its unsent text is not shown". If it asks the helper to resend with `SendMessage`, the report is lost again.
 
-Upstream: [anthropics/claude-code#99651](https://github.com/anthropics/claude-code/issues/99651)
+Upstream: [anthropics/claude-code#96225](https://github.com/anthropics/claude-code/issues/96225) (#99651 was closed as its duplicate)
 
 **What the hook does:** on `PostToolUse` for `Agent` or `SendMessage`, when the result says the report was lost, the hook reads the report from the helper's own transcript. It uses the last `SubagentHandback` message, or else the last text reply. It hands that report to the teammate as `additionalContext`.
 
@@ -94,6 +96,7 @@ echo '{"hook_event_name":"TeammateIdle"}' | claude-team-guard; echo "exit $?"   
 - **One binary for every event.** It dispatches on `hook_event_name` and ignores any event it doesn't handle.
 - **It finds the transcripts by itself.** Teammates and their helpers write to `<session>/subagents/agent-*.jsonl` beside the lead's transcript. The hook locates the right file from `transcript_path`, using `agent_id` or `teammate_name` when it needs to.
 - **Pending tasks are matched on the text Claude Code writes.** A task counts as launched when its tool result says `Command running in background with ID: …` or `Monitor started (task …`. It counts as seen once a `<task-id>` completion notice arrives, or once the teammate itself stops it with `TaskStop` or `KillShell`.
+- **It defers to the lead.** Before blocking, it reads `<config>/teams/<team>/inboxes/<teammate>.json`. The team comes from the payload's `team_name`. Failing that, the hook reads it from the teammate's spawn result in the lead's transcript and caches it, because a resumed session keeps its original team. The last resort is `session-<first 8 of the session id>`. Names are sanitised the way Claude Code does it. If any message in the inbox is unread, the hook lets the teammate idle so the message is delivered. Claude Code empties that file on delivery (checked on 2.1.330).
 - **It never waits.** The hook returns immediately, and the teammate does the waiting with a foreground call.
 - **It fails open.** A parse error, a missing file or a panic exits 0 with no output. A bug here leaves Claude Code behaving as it would without the hook.
 - **State is a small counter per teammate and task set,** kept under your user cache directory (`claude-team-guard/`) and written atomically. Deleting it is harmless.
@@ -107,7 +110,7 @@ echo '{"hook_event_name":"TeammateIdle"}' | claude-team-guard; echo "exit $?"   
 
 ## Removing it
 
-Remove the two hook entries from `settings.json` once #77300 and #99651 are fixed. Nothing else needs cleaning up.
+Remove the two hook entries from `settings.json` once #77300 and #96225 are fixed. Nothing else needs cleaning up.
 
 ## Development
 
