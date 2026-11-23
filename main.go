@@ -35,6 +35,7 @@ type Payload struct {
 	TranscriptPath string          `json:"transcript_path"`
 	AgentID        string          `json:"agent_id"`
 	TeammateName   string          `json:"teammate_name"`
+	TeamName       string          `json:"team_name"`
 	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
 	ToolResponse   json.RawMessage `json:"tool_response"`

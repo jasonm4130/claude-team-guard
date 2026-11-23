@@ -262,3 +262,82 @@ func TestLongLines(t *testing.T) {
 		t.Fatalf("exit = %d, want 2", c)
 	}
 }
+
+// realSession lays out a session the way Claude Code does:
+// <config>/projects/<proj>/<sid>.jsonl, with the team inbox under <config>/teams.
+func realSession(t *testing.T, name, inbox string, recs ...map[string]any) (lead string) {
+	t.Helper()
+	config := t.TempDir()
+	sid := "0123abcd-0000-0000-0000-000000000000"
+	lead = filepath.Join(config, "projects", "proj", sid+".jsonl")
+	writeJSONL(t, lead)
+	sub := filepath.Join(config, "projects", "proj", sid, "subagents")
+	writeJSONL(t, filepath.Join(sub, "agent-a"+name+"-123.jsonl"), recs...)
+	meta, _ := json.Marshal(map[string]any{"name": name, "taskKind": "in_process_teammate"})
+	if err := os.WriteFile(filepath.Join(sub, "agent-a"+name+"-123.meta.json"), meta, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if inbox != "" {
+		dir := filepath.Join(config, "teams", "session-0123abcd", "inboxes")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(inbox), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return lead
+}
+
+func TestIdleYieldsToPendingMessage(t *testing.T) {
+	recs := []map[string]any{bashLaunch("bwait"), say("Waiting for CI.")}
+	pending := `[{"from":"team-lead","text":"rescope","summary":"Rescope"}]`
+	cases := map[string]struct {
+		inbox string
+		want  int
+	}{
+		"message waiting":     {pending, 0},
+		"message marked read": {`[{"from":"team-lead","text":"x","read":true}]`, 2},
+		"empty inbox":         {`[]`, 2},
+		"no inbox file":       {"", 2},
+		"corrupt inbox":       {`{nope`, 2},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			lead := realSession(t, "tm", c.inbox, recs...)
+			env := Env{StateDir: t.TempDir()}
+			if code, _, _ := runHook(t, env, idlePayload(lead, "tm")); code != c.want {
+				t.Fatalf("exit = %d, want %d", code, c.want)
+			}
+		})
+	}
+	t.Run("yield does not use up a block", func(t *testing.T) {
+		lead := realSession(t, "tm", pending, recs...)
+		env := Env{StateDir: t.TempDir()}
+		for i := 0; i < 3; i++ {
+			runHook(t, env, idlePayload(lead, "tm"))
+		}
+		inbox := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(lead))), "teams", "session-0123abcd", "inboxes", "tm.json")
+		if err := os.WriteFile(inbox, []byte(`[]`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if code, _, _ := runHook(t, env, idlePayload(lead, "tm")); code != 2 {
+			t.Fatalf("exit after delivery = %d, want 2", code)
+		}
+	})
+	t.Run("team_name from payload", func(t *testing.T) {
+		lead := realSession(t, "tm", "", recs...)
+		dir := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(lead))), "teams", "my-team", "inboxes")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "tm.json"), []byte(pending), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p := idlePayload(lead, "tm")
+		p["team_name"] = "my-team"
+		if code, _, _ := runHook(t, Env{StateDir: t.TempDir()}, p); code != 0 {
+			t.Fatalf("exit = %d, want 0", code)
+		}
+	})
+}
